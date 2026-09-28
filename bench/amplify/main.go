@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/__GH_OWNER__/byterange"
+	"github.com/kofiadeyemiq/byterange"
 )
 
 const bodySize = 10000

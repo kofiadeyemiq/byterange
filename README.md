@@ -64,7 +64,7 @@ reject" it.
 ## Installation
 
 ```sh
-go get github.com/__GH_OWNER__/byterange
+go get github.com/kofiadeyemiq/byterange
 ```
 
 Go 1.23 or later. No runtime dependencies.

@@ -1,3 +1,3 @@
-module github.com/__GH_OWNER__/byterange
+module github.com/kofiadeyemiq/byterange
 
 go 1.23
