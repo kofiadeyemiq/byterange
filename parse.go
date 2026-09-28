@@ -35,6 +35,33 @@ const defaultMaxRanges = 16
 // opts in with WithMaxTotalBytes.
 const defaultMaxTotalBytes = 0
 
+// emptyElementSlack is how many extra raw list elements (see
+// rawListElementsCap) Parse tolerates per real range a caller's configured
+// WithMaxRanges allows, to accommodate "a reasonable number of empty list
+// elements" (RFC 9110 §5.6.1.2) without that tolerance itself becoming an
+// unbounded cost.
+const emptyElementSlack = 64
+
+// rawListElementsHardCeiling is the absolute cap rawListElementsCap returns
+// when WithMaxRanges is disabled (n <= 0), so a caller who opts out of a
+// range-count limit doesn't also opt out of a bound on parsing cost. It is
+// generous enough that no realistic legitimate request reaches it.
+const rawListElementsHardCeiling = 1 << 16
+
+// rawListElementsCap returns the maximum number of comma-separated elements
+// (empty or not) Parse will scan for a given configured maxRanges. It is a
+// parsing-cost hygiene bound, not a policy choice — see where it is used in
+// Parse.
+func rawListElementsCap(maxRanges int) int {
+	if maxRanges <= 0 {
+		return rawListElementsHardCeiling
+	}
+	if scaled := maxRanges * emptyElementSlack; scaled < rawListElementsHardCeiling {
+		return scaled
+	}
+	return rawListElementsHardCeiling
+}
+
 func defaultConfig() config {
 	return config{
 		maxRanges:     defaultMaxRanges,
@@ -103,14 +130,52 @@ func Parse(header string, size int64, opts ...Option) (Ranges, error) {
 		return nil, fmt.Errorf("%w: %q", ErrUnsupportedUnit, strings.TrimSpace(unit))
 	}
 
-	specs := strings.Split(rangeSet, ",")
+	fields := strings.Split(rangeSet, ",")
+
+	// Empty elements (after OWS) don't contribute to the element count and
+	// are skipped rather than parsed: RFC 9110 §5.6.1.2's recipient grammar
+	// for a #rule list (which range-set is: "range-set = 1#range-spec") is
+	// "#element => [ element ] *( OWS "," OWS [ element ] )", so
+	// "bytes=0-1, ,2-3" and "bytes=0-1,2-3," are both valid range-sets
+	// naming the same two specs a strict "1#range-spec" reading would
+	// reject. "Empty elements do not contribute to the count of elements
+	// present" (same section), so this filtering happens before the
+	// WithMaxRanges check below.
+	specs := fields[:0]
+	for _, f := range fields {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			specs = append(specs, f)
+		}
+	}
+	if len(specs) == 0 {
+		// range-set = 1#range-spec requires at least one non-empty
+		// element; per RFC 9110 §5.6.1.2's own examples, "," and ",   ,"
+		// are invalid for exactly this reason.
+		return nil, ErrMalformed
+	}
+
 	if cfg.maxRanges > 0 && len(specs) > cfg.maxRanges {
 		return nil, fmt.Errorf("%w: %d ranges requested, max %d", ErrTooManyRanges, len(specs), cfg.maxRanges)
 	}
 
+	// RFC 9110 §5.6.1.2: "A recipient MUST parse and ignore a reasonable
+	// number of empty list elements: enough to handle common mistakes by
+	// senders that merge values, but not so much that they could be used
+	// as a denial-of-service mechanism." The check above already rejects a
+	// header naming too many actual ranges; this second check catches the
+	// case that one alone would miss — few real ranges padded with a huge
+	// number of empty elements, e.g. "bytes=0-1,2-3" followed by thousands
+	// of commas — which would otherwise cost this package O(len(fields))
+	// work for no bound at all. rawListElementsCap (see its doc comment)
+	// scales with WithMaxRanges so a caller who raises that cap isn't
+	// second-guessed by this one.
+	if rawCap := rawListElementsCap(cfg.maxRanges); len(fields) > rawCap {
+		return nil, fmt.Errorf("%w: %d list elements (including empty), max %d", ErrMalformed, len(fields), rawCap)
+	}
+
 	raw := make([]Range, 0, len(specs))
 	for _, spec := range specs {
-		spec = strings.TrimSpace(spec)
 		r, satisfiable, ok := parseSpec(spec, size)
 		if !ok {
 			// RFC 9110 §14.1.1: "A ranges-specifier is invalid if it

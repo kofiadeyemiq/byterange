@@ -2,6 +2,7 @@ package byterange
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -111,6 +112,92 @@ func TestParse_Malformed(t *testing.T) {
 		if !errors.Is(err, ErrMalformed) {
 			t.Errorf("Parse(%q, 1000) error = %v, want ErrMalformed", header, err)
 		}
+	}
+}
+
+// TestParse_EmptyListElements checks RFC 9110 §5.6.1.2's recipient
+// requirement for #rule lists (which range-set is one of, since
+// range-set = 1#range-spec): "A recipient MUST parse and ignore a
+// reasonable number of empty list elements ... In other words, a recipient
+// MUST accept lists that satisfy the following syntax:
+// #element => [ element ] *( OWS "," OWS [ element ] )". A stricter reading
+// that rejected any empty element (this package's earlier behavior) is not
+// RFC-compliant.
+func TestParse_EmptyListElements(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		want   Ranges
+	}{
+		// The defect this test was added for: an embedded empty element
+		// (with surrounding whitespace) must not invalidate the header.
+		{"embedded empty element", "bytes=0-1, ,2-3", Ranges{{0, 3}}}, // adjacent, coalesced
+		{"leading empty element", "bytes=,0-4", Ranges{{0, 4}}},
+		{"trailing empty element", "bytes=0-4,", Ranges{{0, 4}}},
+		{"multiple consecutive empty elements", "bytes=0-1,,,,2-3", Ranges{{0, 3}}},
+		// Adapted from RFC 9110 §5.6.1.2's own #rule examples
+		// ("foo,bar" / "foo ,bar," / "foo , ,bar,charlie" are all valid):
+		{"RFC example shape: element,element", "bytes=100-104,200-204", Ranges{{100, 104}, {200, 204}}},
+		{"RFC example shape: element ,element,", "bytes=100-104 ,200-204,", Ranges{{100, 104}, {200, 204}}},
+		{"RFC example shape: element , ,element,element2", "bytes=100-104 , ,200-204,300-304", Ranges{{100, 104}, {200, 204}, {300, 304}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Parse(tt.header, 1000)
+			if err != nil {
+				t.Fatalf("Parse(%q, 1000) error = %v, want nil", tt.header, err)
+			}
+			assertRangesEqual(t, got, tt.want)
+		})
+	}
+}
+
+// TestParse_AllEmptyListElementsInvalid checks the other side of RFC 9110
+// §5.6.1.2's own examples: "," and ",   ," are invalid, "since at least one
+// non-empty element is required" — range-set = 1#range-spec has exactly
+// that minimum-one requirement.
+func TestParse_AllEmptyListElementsInvalid(t *testing.T) {
+	for _, header := range []string{"bytes=,", "bytes=,,,", "bytes=,   ,", "bytes= , , "} {
+		_, err := Parse(header, 1000)
+		if !errors.Is(err, ErrMalformed) {
+			t.Errorf("Parse(%q, 1000) error = %v, want ErrMalformed", header, err)
+		}
+	}
+}
+
+// TestParse_EmptyElementFloodIsBounded checks the denial-of-service half of
+// RFC 9110 §5.6.1.2: a recipient must ignore a reasonable number of empty
+// elements "but not so much that they could be used as a denial-of-service
+// mechanism." A header naming only two real ranges, padded with far more
+// empty elements than rawListElementsCap allows for the default
+// WithMaxRanges, is rejected — not accepted at unbounded cost, and not
+// rejected via ErrTooManyRanges (which would be the wrong reason: there are
+// only two real ranges here, well under the default cap of 16).
+func TestParse_EmptyElementFloodIsBounded(t *testing.T) {
+	header := "bytes=0-1," + strings.Repeat(",", 2000) + "10-11"
+	_, err := Parse(header, 1000)
+	if !errors.Is(err, ErrMalformed) {
+		t.Fatalf("Parse with 2000 empty elements: error = %v, want ErrMalformed", err)
+	}
+	if errors.Is(err, ErrTooManyRanges) {
+		t.Fatalf("Parse with 2000 empty elements but 2 real ranges: error = %v, should not also be ErrTooManyRanges", err)
+	}
+}
+
+// TestParse_EmptyElementFloodDoesNotOverrideMaxRanges checks that a caller
+// who raises WithMaxRanges also gets a correspondingly higher tolerance for
+// empty elements (rawListElementsCap scales with maxRanges), rather than
+// the fixed default silently capping them below their own configured limit.
+func TestParse_EmptyElementFloodDoesNotOverrideMaxRanges(t *testing.T) {
+	// 100 real ranges, comfortably under WithMaxRanges(200), padded with
+	// 500 empty elements: still well under 200*emptyElementSlack.
+	var b strings.Builder
+	b.WriteString(manySmallRangesHeader(100))
+	b.WriteString(strings.Repeat(",", 500))
+	header := b.String()
+
+	if _, err := Parse(header, 100000, WithMaxRanges(200)); err != nil {
+		t.Fatalf("Parse with raised WithMaxRanges: error = %v, want nil", err)
 	}
 }
 

@@ -196,14 +196,20 @@ Parses a Range header field value against a representation of `size` bytes.
 ## How it works
 
 `Parse` splits the header on `=`, checks the unit case-insensitively against
-`bytes`, and rejects the whole header outright if there are more range-specs
-than `WithMaxRanges` allows — before parsing a single one, so a hostile header
-costs this package O(1) work instead of O(n). Each remaining range-spec is
-parsed per RFC 9110 §14.1.2's grammar (`first-last`, `first-`, `-suffix`),
-clamped against `size`, and dropped if unsatisfiable; any spec that is
-syntactically invalid invalidates the whole header (RFC 9110 §14.1.1). What's
-left is sorted and coalesced (RFC 9110 §15.3.7.2), then checked against
-`WithMaxTotalBytes`.
+`bytes`, then splits the range-set on `,`. Empty elements (RFC 9110 §5.6.1.2's
+`#rule` list syntax, which `range-set = 1#range-spec` is one of) are skipped
+rather than parsed — `bytes=0-1, ,2-3` and `bytes=0-1,2-3,` are both valid,
+naming the same ranges a strict reading would reject — but a header naming
+too many actual ranges is rejected against `WithMaxRanges` before a single one
+is parsed, and a header padded with far more empty elements than real ranges
+is rejected against a separate, non-configurable hygiene bound (RFC 9110
+§5.6.1.2 requires tolerating "a reasonable number of empty list elements ...
+but not so much that they could be used as a denial-of-service mechanism").
+Each remaining range-spec is then parsed per RFC 9110 §14.1.2's grammar
+(`first-last`, `first-`, `-suffix`), clamped against `size`, and dropped if
+unsatisfiable; any spec that is syntactically invalid invalidates the whole
+header (RFC 9110 §14.1.1). What's left is sorted and coalesced (RFC 9110
+§15.3.7.2), then checked against `WithMaxTotalBytes`.
 
 `Serve` layers HTTP semantics on top: it evaluates `If-Range`, maps each
 `Parse` outcome to the response RFC 9110 §14.2 describes for it, and for a
